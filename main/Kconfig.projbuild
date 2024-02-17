@@ -1,19 +1,13 @@
-menu "Example Configuration"
+menu "Rower Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
-    config GPIO_OUTPUT_0
-        int "GPIO output pin 0"
-        range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
-        default 19
-        help
-            GPIO pin number to be used as GPIO_OUTPUT_IO_0.
-
-    config GPIO_INPUT_0
+    config GPIO_REED
         int "GPIO input pin 0"
         range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
-        default 5
+        default 8
         help
-            GPIO pin number to be used as GPIO_INPUT_IO_0.
+            GPIO pin number to be used as rotation sensor reed input
+
 
 endmenu
