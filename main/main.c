@@ -59,22 +59,20 @@ static QueueHandle_t gpio_evt_queue = NULL;
 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
-    uint32_t gpio_num = (uint32_t) arg;
-    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+    //uint32_t gpio_num = (uint32_t) arg;
+    uint32_t trigger_time = esp_timer_get_time();
+    xQueueSendFromISR(gpio_evt_queue, &trigger_time, NULL);
 }
 
 static uint32_t trigger_count = 0;
+static uint32_t last_trigger = 0;
 static void gpio_task(void* arg)
 {
-    uint32_t io_num;
+    uint32_t trigger_time;
     for (;;) {
-        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
-            if (io_num == GPIO_INPUT_IO_0) {
-                trigger_count++;
-            }
-            else {
-                printf("isr for io %" PRIu32 "\n", io_num);
-            }
+        if (xQueueReceive(gpio_evt_queue, &trigger_time, portMAX_DELAY)) {
+            trigger_count++;
+            last_trigger = trigger_time;
         }
     }
 }
@@ -130,25 +128,41 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(hd44780_init(&lcd));
     hd44780_gotoxy(&lcd,0,0);
-    hd44780_puts(&lcd, "rowing data:");
+    // 2x16            "1234567890123456"
+    hd44780_puts(&lcd, "sec  pwr    dist");
 
     printf("Minimum free heap size: %"PRIu32" bytes\n", esp_get_minimum_free_heap_size());
 
     static char line2[16];
-    static int interval = 0;
-    int last_time = esp_timer_get_time();
-    static int scaled_adc = 0;
+    int64_t last_time = esp_timer_get_time();
+    //static unsigned char scaled_adc = 0;
+    static uint32_t distance = 0;
+    static uint32_t elapsed = 0;
+    static unsigned char min = 0;
+    static unsigned char sec = 0;
+    static char elapsed_string[8];
+    static char power_string[6];
+    static char distance_string[11];
+    trigger_count = 0;
     while (1) {
         if (esp_timer_get_time() - last_time > 500000) { // every half-second
             last_time = esp_timer_get_time();
             ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw[0][0]));
-            scaled_adc = adc_raw[0][0]>>3;
-            printf("ADC: %d, triggers: %"PRIu32", interval %d\n", scaled_adc, trigger_count, interval++);
+            // ADC is 0 to 4095.  right-shift 4 takes it to 0-255
+            //scaled_adc = (unsigned char) adc_raw[0][0]>>4;
+            distance += trigger_count;
+            elapsed = last_time / 1000000;
+            min = elapsed / 60;
+            sec = elapsed % 60;
+            //printf("elapsed: %02d:%02d, triggers: %5d, distance %8lu\n", min, sec, (unsigned short) trigger_count, (unsigned long) distance);
+            snprintf(elapsed_string, 8, "%02d:%02d", min, sec);
+            snprintf(power_string, 6, "%3d", (unsigned short) trigger_count);
+            snprintf(distance_string, 11, "%"PRIu32, distance);
+            //snprintf(line2, 17, "%.5s%4d%7d", mmss, (unsigned short) trigger_count, (unsigned short) distance);
+            snprintf(line2, 17, "%.5s%4.4s%7.7s", elapsed_string, power_string, distance_string);
+            printf("time  pwr   dist\n");
+            printf("%s\n", line2);
             hd44780_gotoxy(&lcd, 0, 1);
-            snprintf(line2, 7, "%6d", scaled_adc);
-            hd44780_puts(&lcd, line2);
-            hd44780_gotoxy(&lcd, 8, 1);
-            snprintf(line2, 14, "%" PRIu32, trigger_count);
             hd44780_puts(&lcd, line2);
             trigger_count = 0;
         }
