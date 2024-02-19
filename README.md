@@ -1,32 +1,28 @@
-# _Sample project_
+# row
+Replacement brainz for my (NordicTrack RW600) rowing machine.
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+## Folder contents
+* components/hd44780 - ripped from https://github.com/UncleRus/esp-idf-lib to control the LCD
+* components/esp_idf_lib_helpers - required for hd44780 and taken from the same place
 
-This is the simplest buildable example. The example is used by command `idf.py create-project`
-that copies the project to user specified path and set it's name. For more information follow the [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project)
+## Current State
+Displays the following:
+* time: mm:ss of active time (only increments when wheel is spinning)
+* pwr:  ### of reed switch impulses per half-second
+  * == wheel rotations * (unknown atm) number of magnets
+* distance: total # of reed switch impulses (basically dimensionless) 
 
+## Plans
+* calculate and display stroke rate
+  * detect Stroke (impulse interval decreasing)
+  * detect Recovery (impulse interval increasing)
+* control the magnetic resistance
+  * standard DC motor forward/reverse with potentiometer to indicate current position
 
-
-## How to use example
-We encourage the users to use the example as a template for the new projects.
-A recommended way is to follow the instructions on a [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project).
-
-## Example folder contents
-
-The project **sample_project** contains one source file in C language [main.c](main/main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt`
-files that provide set of directives and instructions describing the project's source files and targets
-(executable, library, or both). 
-
-Below is short explanation of remaining files in the project folder.
-
-```
-├── CMakeLists.txt
-├── main
-│   ├── CMakeLists.txt
-│   └── main.c
-└── README.md                  This is the file you are currently reading
-```
-Additionally, the sample project contains Makefile and component.mk files, used for the legacy Make based build system. 
-They are not used or needed when building with CMake and idf.py.
+## Reference / similar projects
+* [openrowingmonitor](https://github.com/laberning/openrowingmonitor) 
+  * Mature and complex project in nodejs for Raspberry Pi. 
+  * Trying to be physics-accurate, which is overkill for what i'm doing, but still a good reference
+* [ArduRower](https://github.com/zpukr/ArduRower), which references...
+* [waterrino](https://github.com/adruino-io/waterrino), which references...
+* [yunrower](https://bitbucket.org/giobianchi/yun_rower/src/master/)
