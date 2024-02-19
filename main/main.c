@@ -77,7 +77,7 @@ static void gpio_task(void* arg)
     }
 }
 
-static int adc_raw[2][10];
+//static int adc_raw[2][10];
 void app_main(void)
 {
     // initialize the reed input switch GPIO
@@ -129,7 +129,7 @@ void app_main(void)
     ESP_ERROR_CHECK(hd44780_init(&lcd));
     hd44780_gotoxy(&lcd,0,0);
     // 2x16            "1234567890123456"
-    hd44780_puts(&lcd, "sec  pwr    dist");
+    hd44780_puts(&lcd, "time  pwr   dist");
 
     printf("Minimum free heap size: %"PRIu32" bytes\n", esp_get_minimum_free_heap_size());
 
@@ -138,33 +138,58 @@ void app_main(void)
     //static unsigned char scaled_adc = 0;
     static uint32_t distance = 0;
     static uint32_t elapsed = 0;
+    static uint32_t now = 0;
     static unsigned char min = 0;
     static unsigned char sec = 0;
     static char elapsed_string[8];
     static char power_string[6];
     static char distance_string[11];
+    static bool active = false;
+    static uint32_t interval_triggers = 0;
     trigger_count = 0;
     while (1) {
-        if (esp_timer_get_time() - last_time > 500000) { // every half-second
-            last_time = esp_timer_get_time();
-            ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw[0][0]));
+        now = esp_timer_get_time();
+        if (now - last_time >= 500000) { // every half-second
+            // grab and reset trigger count to not lose triggers during processing
+            interval_triggers = trigger_count;
+            trigger_count = 0;
+            // first check if state needs to change
+            if (active) {
+                // check if not active
+                if (interval_triggers == 0) {
+                    active = false;
+                }
+            }
+            else {
+                // check if active
+                if (interval_triggers > 0) {
+                    active = true;
+                }
+            }
+            // now process per state
+            if (active) {
+                distance += interval_triggers;
+                elapsed += (now - last_time);
+                min = elapsed / 60000000;
+                sec = (elapsed / 1000000) % 60;
+            }
+            //ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw[0][0]));
             // ADC is 0 to 4095.  right-shift 4 takes it to 0-255
             //scaled_adc = (unsigned char) adc_raw[0][0]>>4;
-            distance += trigger_count;
-            elapsed = last_time / 1000000;
-            min = elapsed / 60;
-            sec = elapsed % 60;
-            //printf("elapsed: %02d:%02d, triggers: %5d, distance %8lu\n", min, sec, (unsigned short) trigger_count, (unsigned long) distance);
+
+            // create output line
             snprintf(elapsed_string, 8, "%02d:%02d", min, sec);
-            snprintf(power_string, 6, "%3d", (unsigned short) trigger_count);
+            snprintf(power_string, 6, "%3d", (unsigned short) interval_triggers);
             snprintf(distance_string, 11, "%"PRIu32, distance);
-            //snprintf(line2, 17, "%.5s%4d%7d", mmss, (unsigned short) trigger_count, (unsigned short) distance);
             snprintf(line2, 17, "%.5s%4.4s%7.7s", elapsed_string, power_string, distance_string);
+            // print to stdout
+            printf("%"PRIu32"\n", (uint32_t) (now - last_time));
             printf("time  pwr   dist\n");
             printf("%s\n", line2);
+            // display on LCD
             hd44780_gotoxy(&lcd, 0, 1);
             hd44780_puts(&lcd, line2);
-            trigger_count = 0;
+            last_time = now;
         }
 
         // allow other tasks time to run
