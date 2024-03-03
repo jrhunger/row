@@ -52,6 +52,31 @@
 #define GPIO_INPUT_IO_0  GPIO_NUM_9
 #define ESP_INTR_FLAG_DEFAULT 0
 
+// Savitzky-Golay linear/quadratic https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
+static int coefficient[9] = {-4, -3, -2, -1, 0, 1, 2, 3, 4};
+// the trailing delay values
+static int64_t delayvector[9] = {1024,1024,1024,1024,1024,1024,1024,1024,1024};
+static int derivative = 0;
+static int64_t last_pull = 0;
+static uint32_t pull_duration = 1; // avoid divide-by-zero when calculating stroke rate
+static void add_delay(int delay) {
+    // do the last calculation first to initialize deriv
+    int deriv = delay * coefficient[0];
+    for (int count = 8; count > 0; count-- ) {
+        delayvector[count] = delayvector[count-1];
+        deriv += delayvector[count] * coefficient[count];
+    }
+    delayvector[0] = delay;
+    // negative derivative means accelerating since we are working with the delay
+    if (derivative >= 0 && deriv < 0) {
+        pull_duration = esp_timer_get_time() - last_pull;
+        last_pull = esp_timer_get_time();
+    }
+    // don't actually care about the real derivative, just the sign of it
+    //derivative = deriv / normalization;
+    derivative = deriv;
+}
+
 // GPIO read logic
 static QueueHandle_t gpio_evt_queue = NULL;
 
@@ -68,6 +93,7 @@ static void gpio_task(void* arg) {
     for (;;) {
         if (xQueueReceive(gpio_evt_queue, &trigger_time, portMAX_DELAY)) {
             trigger_count++;
+            add_delay(trigger_time - last_trigger);
             last_trigger = trigger_time;
         }
     }
@@ -136,8 +162,7 @@ void app_main(void)
     static uint32_t distance = 0;
     static uint32_t elapsed = 0;
     static uint32_t rest = 0;
-    static uint32_t now = 0;
-    static uint32_t last_pull = 0;
+    static int64_t now = 0;
     static unsigned char min = 0;
     static unsigned char sec = 0;
     static unsigned char restmin = 0;
@@ -150,10 +175,8 @@ void app_main(void)
     static char pull_string[11];
     static bool active = false;
     static uint32_t interval_triggers = 0;
-    static uint32_t last_triggers = 0;
     static uint32_t strokes = 0;
     static unsigned short pull_rate = 0;
-    static bool pull = false;
     trigger_count = 0;
     while (1) {
         now = esp_timer_get_time();
@@ -182,31 +205,15 @@ void app_main(void)
 
             // then process per state
             if (active) {
+                pull_rate = 60000000/pull_duration;
                 distance += interval_triggers;
                 // show total elapsed training time
                 elapsed += (now - last_time);
-
-                // check stroke phase (roughly)
-                if (pull) {
-                    // power decreasing, roughly call it recovery
-                    if (interval_triggers < last_triggers) {
-                        pull = false;
-                    }
-                }
-                else {
-                    if (interval_triggers > last_triggers) {
-                        strokes += 1;
-                        pull = true;
-                        pull_rate = 60000000/(now - last_pull);
-                        last_pull = now;
-                    }
-                }
-                last_triggers = interval_triggers;
             }
             else {
                 // show resting time
                 rest += (now - last_time);
-                pull = false;
+                pull_rate = 0;
             }
 
             min = elapsed / 60000000;
