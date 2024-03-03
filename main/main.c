@@ -73,6 +73,21 @@ static void gpio_task(void* arg) {
     }
 }
 
+// https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
+// note - not skipping division by normalization because we only care about the sign
+static int coeff[5] = {-2, -1, 0, 1, 2};
+static int samples[5] = {0, 0, 0, 0, 0};
+static int derivative(int sample) { 
+    int deriv = sample * coeff[4];
+    for (int i = 0; i<4; i++) {
+        samples[i] = samples[i+1];
+        deriv += samples[i] * coeff[i];
+    }
+    samples[4] = sample;
+    //printf("--> sample %d, deriv %d\n", sample, deriv);
+    return deriv;
+}
+
 //static int adc_raw[2][10];
 void app_main(void)
 {
@@ -131,13 +146,15 @@ void app_main(void)
 
     static char line1[16];
     static char line2[16];
-    int64_t last_time = esp_timer_get_time();
     //static unsigned char scaled_adc = 0;
     static uint32_t distance = 0;
     static uint32_t elapsed = 0;
     static uint32_t rest = 0;
-    static uint32_t now = 0;
-    static uint32_t last_pull = 0;
+    // time variables
+    static int64_t last_time = 0;
+    static int64_t now = 0;
+    static int64_t last_pull = 0;
+    static int64_t last_display = 0;
     static unsigned char min = 0;
     static unsigned char sec = 0;
     static unsigned char restmin = 0;
@@ -150,14 +167,14 @@ void app_main(void)
     static char pull_string[11];
     static bool active = false;
     static uint32_t interval_triggers = 0;
-    static uint32_t last_triggers = 0;
     static uint32_t strokes = 0;
     static unsigned short pull_rate = 0;
     static bool pull = false;
     trigger_count = 0;
+    last_time = esp_timer_get_time();
     while (1) {
         now = esp_timer_get_time();
-        if (now - last_time >= 500000) { // every half-second
+        if (now - last_time >= 200000) { // every 1/5 second
             // grab and reset trigger count to not lose triggers during processing
             interval_triggers = trigger_count;
             trigger_count = 0;
@@ -166,7 +183,7 @@ void app_main(void)
             if (active) {
                 // check if not active
                 if (interval_triggers == 0) {
-                    printf("switching to rest\n");
+                    printf("--> rest\n");
                     pull_rate = 0;
                     active = false;
                 }
@@ -174,7 +191,7 @@ void app_main(void)
             else {
                 // check if active
                 if (interval_triggers > 0) {
-                    printf("switching to active\n");
+                    printf("--> active\n");
                     active = true;
                     rest = 0;
                 }
@@ -188,57 +205,60 @@ void app_main(void)
 
                 // check stroke phase (roughly)
                 if (pull) {
-                    // power decreasing, roughly call it recovery
-                    if (interval_triggers < last_triggers) {
+                    if (derivative(interval_triggers) <= 0) {
                         pull = false;
                     }
                 }
                 else {
-                    if (interval_triggers > last_triggers) {
+                    if (derivative(interval_triggers) > 0) {
                         strokes += 1;
                         pull = true;
                         pull_rate = 60000000/(now - last_pull);
                         last_pull = now;
+                        printf("--> pull\n");
                     }
                 }
-                last_triggers = interval_triggers;
             }
             else {
-                // show resting time
+                // add zero samples to derivative vector
+                derivative(0);
                 rest += (now - last_time);
                 pull = false;
             }
 
-            min = elapsed / 60000000;
-            sec = (elapsed / 1000000) % 60;
-            restmin = rest / 60000000;
-            restsec = (rest / 1000000) % 60;
-                
-            //ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw[0][0]));
-            // ADC is 0 to 4095.  right-shift 4 takes it to 0-255
-            //scaled_adc = (unsigned char) adc_raw[0][0]>>4;
+            if (now - last_display >= 500000) {
+                min = elapsed / 60000000;
+                sec = (elapsed / 1000000) % 60;
+                restmin = rest / 60000000;
+                restsec = (rest / 1000000) % 60;
+                    
+                //ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw[0][0]));
+                // ADC is 0 to 4095.  right-shift 4 takes it to 0-255
+                //scaled_adc = (unsigned char) adc_raw[0][0]>>4;
 
-            // create output line 1
-            snprintf(resting_string, 8, "%02d:%02d", restmin, restsec);
-            snprintf(strokes_string, 6, "%3d", pull_rate);
-            snprintf(pull_string, 11, "%"PRIu32, strokes);
-            snprintf(line1, 17, "%.5s%4.4s%7.7s", resting_string, strokes_string, pull_string);
-            printf("%s\n", line1);
+                // create output line 1
+                snprintf(resting_string, 8, "%02d:%02d", restmin, restsec);
+                snprintf(strokes_string, 6, "%3d", pull_rate);
+                snprintf(pull_string, 11, "%"PRIu32, strokes);
+                snprintf(line1, 17, "%.5s%4.4s%7.7s", resting_string, strokes_string, pull_string);
+                printf("%s\n", line1);
 
-            // create output line 2
-            snprintf(elapsed_string, 8, "%02d:%02d", min, sec);
-            snprintf(power_string, 6, "%3d", (unsigned short) interval_triggers);
-            snprintf(distance_string, 11, "%"PRIu32, distance);
-            snprintf(line2, 17, "%.5s%4.4s%7.7s", elapsed_string, power_string, distance_string);
+                // create output line 2
+                snprintf(elapsed_string, 8, "%02d:%02d", min, sec);
+                snprintf(power_string, 6, "%3d", (unsigned short) interval_triggers);
+                snprintf(distance_string, 11, "%"PRIu32, distance);
+                snprintf(line2, 17, "%.5s%4.4s%7.7s", elapsed_string, power_string, distance_string);
 
-            // print to stdout
-            //printf("%"PRIu32"\n", (uint32_t) (now - last_time));
-            printf("%s\n", line2);
-            // display on LCD
-            hd44780_gotoxy(&lcd, 0, 0);
-            hd44780_puts(&lcd, line1);
-            hd44780_gotoxy(&lcd, 0, 1);
-            hd44780_puts(&lcd, line2);
+                // print to stdout
+                //printf("%"PRIu32"\n", (uint32_t) (now - last_time));
+                printf("%s\n", line2);
+                // display on LCD
+                hd44780_gotoxy(&lcd, 0, 0);
+                hd44780_puts(&lcd, line1);
+                hd44780_gotoxy(&lcd, 0, 1);
+                hd44780_puts(&lcd, line2);
+                last_display = now;
+            }
             last_time = now;
         }
 
