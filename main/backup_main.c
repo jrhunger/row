@@ -68,9 +68,27 @@ static void gpio_task(void* arg) {
     for (;;) {
         if (xQueueReceive(gpio_evt_queue, &trigger_time, portMAX_DELAY)) {
             trigger_count++;
+            add_delay(trigger_time - last_trigger);
             last_trigger = trigger_time;
         }
     }
+}
+
+// Savitzky-Golay linear/quadratic https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
+static int[5] coefficient = [-2,-1,0,1,2];
+static int normalization = 10;
+// the trailing delay values
+static int[5] delayvector = [0,0,0,0,0];
+static int derivative = 0;
+static void add_delay(int delay) {
+    // do the last calculation first to initialize deriv
+    int deriv = delay * coefficient[0];
+    for (int count = 4; count > 0; count-- ) {
+        delayvector[count] = delayvector[count-1];
+        deriv += delayvector[count] * coefficient[count];
+    }
+    delayvector[0] = delay;
+    derivative = deriv / normalization;
 }
 
 //static int adc_raw[2][10];
