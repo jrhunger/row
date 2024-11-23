@@ -17,6 +17,7 @@
 #include "esp_timer.h"
 #include "esp_adc/adc_oneshot.h"
 #include "hd44780.h"
+#include "custom_chars.h"
 
 /**
  * Brief: Replacement controller for NordicTrack RW600 Rower
@@ -88,6 +89,124 @@ static int derivative(int sample) {
     return deriv;
 }
 
+hd44780_t lcd = {
+        .write_cb = NULL,
+        .font = HD44780_FONT_5X8,
+        .lines = 2,
+        .pins = {
+            .e  = GPIO_NUM_18,
+            .rs = GPIO_NUM_19,
+            .d4 = GPIO_NUM_4,
+            .d5 = GPIO_NUM_5,
+            .d6 = GPIO_NUM_6,
+            .d7 = GPIO_NUM_7,
+            .bl = HD44780_NOT_USED
+        }
+};
+
+static void init_display() {
+    ESP_ERROR_CHECK(hd44780_init(&lcd));
+    hd44780_upload_character(&lcd, 0, cchar0);
+    hd44780_upload_character(&lcd, 1, cchar1);
+    hd44780_upload_character(&lcd, 2, cchar2);
+    hd44780_upload_character(&lcd, 3, cchar3);
+    hd44780_upload_character(&lcd, 4, cchar4);
+    hd44780_upload_character(&lcd, 5, cchar5);
+
+    hd44780_gotoxy(&lcd,0,0);
+    // 2x16            "1234567890123456"
+    hd44780_puts(&lcd, "time  pwr   dist");
+}
+
+static uint32_t pacer_time;
+static int32_t target_usec;
+static void init_pacer() {
+    pacer_time = 0;
+    target_usec = 60 * 1000000 / 26;
+}
+
+static void update_pacer () {
+    int strokeprogress;
+    int bars;
+    uint32_t now = (uint32_t) esp_timer_get_time();  
+    if ((now - pacer_time) >= target_usec) {
+        printf("%"PRIu32"\n", now - pacer_time);
+        pacer_time = now;
+        strokeprogress = 0;
+        bars = 0;
+    }
+    else {
+        strokeprogress = (now - pacer_time) * 50 / target_usec;
+        if (strokeprogress > 25) {
+            bars = 50 - strokeprogress;
+        }
+        else {
+            bars = strokeprogress;
+        }
+    }
+
+    for (int i = 1; i <= 5; i++) {
+        hd44780_gotoxy(&lcd, i-1, 0);
+        if(bars >= i * 5) {
+            hd44780_putc(&lcd, 5);
+        }
+        else if (bars <= (i-1)*5) {
+            hd44780_putc(&lcd, 0);
+        }
+        else {
+            hd44780_putc(&lcd, bars % 5 + 1);
+        }
+    }
+}
+
+static void update_display(
+                    //line 1
+                    unsigned char restmin, 
+                    unsigned char restsec, 
+                    unsigned short pull_rate,
+                    uint32_t strokes,
+                    // line 2
+                    unsigned char min, 
+                    unsigned char sec,
+                    uint32_t interval_triggers,
+                    uint32_t distance
+) {
+    static char elapsed_string[8];
+    static char resting_string[8];
+    static char strokes_string[6];
+    static char power_string[6];
+    static char distance_string[11];
+    static char pull_string[11];
+    static char line[16];
+
+    // create output line 0
+    snprintf(strokes_string, 6, "%3d", pull_rate);
+    snprintf(pull_string, 11, "%"PRIu32, strokes);
+    if (restmin != 0 || restsec != 0) {
+        snprintf(resting_string, 8, "%02d:%02d", restmin, restsec);
+        snprintf(line, 17, "%.5s%4.4s%7.7s", resting_string, strokes_string, pull_string);
+        hd44780_gotoxy(&lcd, 0, 0);
+    }
+    else {
+        hd44780_gotoxy(&lcd, 5, 0);
+        snprintf(line, 12, "%4.4s%7.7s", strokes_string, pull_string);
+    }
+    //printf("%s\n", line);
+    // display on LCD line 0
+    hd44780_puts(&lcd, line);
+
+    // create output line 1
+    snprintf(elapsed_string, 8, "%02d:%02d", min, sec);
+    snprintf(power_string, 6, "%3d", (unsigned short) interval_triggers);
+    snprintf(distance_string, 11, "%"PRIu32, distance);
+    snprintf(line, 17, "%.5s%4.4s%7.7s", elapsed_string, power_string, distance_string);
+    //printf("%s\n", line);
+    // display on LCD line 1
+    hd44780_gotoxy(&lcd, 0, 1);
+    hd44780_puts(&lcd, line);
+ }
+
+
 //static int adc_raw[2][10];
 void app_main(void)
 {
@@ -123,29 +242,11 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_2, &config));
 
-    hd44780_t lcd = {
-        .write_cb = NULL,
-        .font = HD44780_FONT_5X8,
-        .lines = 2,
-        .pins = {
-            .e  = GPIO_NUM_18,
-            .rs = GPIO_NUM_19,
-            .d4 = GPIO_NUM_4,
-            .d5 = GPIO_NUM_5,
-            .d6 = GPIO_NUM_6,
-            .d7 = GPIO_NUM_7,
-            .bl = HD44780_NOT_USED
-        }
-    };
-    ESP_ERROR_CHECK(hd44780_init(&lcd));
-    hd44780_gotoxy(&lcd,0,0);
-    // 2x16            "1234567890123456"
-    hd44780_puts(&lcd, "time  pwr   dist");
+    init_display();
+    init_pacer();
 
     printf("Minimum free heap size: %"PRIu32" bytes\n", esp_get_minimum_free_heap_size());
 
-    static char line1[16];
-    static char line2[16];
     //static unsigned char scaled_adc = 0;
     static uint32_t distance = 0;
     static uint32_t elapsed = 0;
@@ -159,12 +260,6 @@ void app_main(void)
     static unsigned char sec = 0;
     static unsigned char restmin = 0;
     static unsigned char restsec = 0;
-    static char elapsed_string[8];
-    static char resting_string[8];
-    static char strokes_string[6];
-    static char power_string[6];
-    static char distance_string[11];
-    static char pull_string[11];
     static bool active = false;
     static uint32_t interval_triggers = 0;
     static uint32_t strokes = 0;
@@ -187,6 +282,7 @@ void app_main(void)
                     pull_rate = 0;
                     active = false;
                 }
+                update_pacer();
             }
             else {
                 // check if active
@@ -211,11 +307,16 @@ void app_main(void)
                 }
                 else {
                     if (derivative(interval_triggers) > 0) {
-                        strokes += 1;
-                        pull = true;
-                        pull_rate = 60000000/(now - last_pull);
-                        last_pull = now;
-                        printf("--> pull\n");
+                        // ignore as false positive if stroke rate seems too high
+                        if (60000000/(now - last_pull) < 40) {
+                            strokes += 1;
+                            pull = true;
+                            pull_rate = 60000000/(now - last_pull);
+                            last_pull = now;
+                            printf("-->       pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
+                        } else {
+                            printf("--> false-pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
+                        }
                     }
                 }
             }
@@ -226,7 +327,7 @@ void app_main(void)
                 pull = false;
             }
 
-            if (now - last_display >= 500000) {
+            if (now - last_display >= 590000) {
                 min = elapsed / 60000000;
                 sec = (elapsed / 1000000) % 60;
                 restmin = rest / 60000000;
@@ -236,27 +337,16 @@ void app_main(void)
                 // ADC is 0 to 4095.  right-shift 4 takes it to 0-255
                 //scaled_adc = (unsigned char) adc_raw[0][0]>>4;
 
-                // create output line 1
-                snprintf(resting_string, 8, "%02d:%02d", restmin, restsec);
-                snprintf(strokes_string, 6, "%3d", pull_rate);
-                snprintf(pull_string, 11, "%"PRIu32, strokes);
-                snprintf(line1, 17, "%.5s%4.4s%7.7s", resting_string, strokes_string, pull_string);
-                printf("%s\n", line1);
-
-                // create output line 2
-                snprintf(elapsed_string, 8, "%02d:%02d", min, sec);
-                snprintf(power_string, 6, "%3d", (unsigned short) interval_triggers);
-                snprintf(distance_string, 11, "%"PRIu32, distance);
-                snprintf(line2, 17, "%.5s%4.4s%7.7s", elapsed_string, power_string, distance_string);
-
-                // print to stdout
-                //printf("%"PRIu32"\n", (uint32_t) (now - last_time));
-                printf("%s\n", line2);
-                // display on LCD
-                hd44780_gotoxy(&lcd, 0, 0);
-                hd44780_puts(&lcd, line1);
-                hd44780_gotoxy(&lcd, 0, 1);
-                hd44780_puts(&lcd, line2);
+                update_display(
+                    //line 1
+                    restmin, restsec, 
+                    pull_rate,
+                    strokes,
+                    // line 2
+                    min, sec,
+                    interval_triggers,
+                    distance
+                );
                 last_display = now;
             }
             last_time = now;
