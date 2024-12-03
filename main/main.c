@@ -76,15 +76,17 @@ static void gpio_task(void* arg) {
 
 // https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
 // note - not skipping division by normalization because we only care about the sign
-static int coeff[5] = {-2, -1, 0, 1, 2};
-static int samples[5] = {0, 0, 0, 0, 0};
+//static int coeff[5] = {-2, -1, 0, 1, 2};
+//static int samples[5] = {0, 0, 0, 0, 0};
+static int coeff[9] = {-4, -3, -2, -1, 0, 1, 2, 3, 4};
+static int samples[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 static int derivative(int sample) { 
-    int deriv = sample * coeff[4];
-    for (int i = 0; i<4; i++) {
+    int deriv = sample * coeff[8];
+    for (int i = 0; i<8; i++) {
         samples[i] = samples[i+1];
         deriv += samples[i] * coeff[i];
     }
-    samples[4] = sample;
+    samples[8] = sample;
     //printf("--> sample %d, deriv %d\n", sample, deriv);
     return deriv;
 }
@@ -130,22 +132,22 @@ static void update_pacer () {
     int bars;
     uint32_t now = (uint32_t) esp_timer_get_time();  
     if ((now - pacer_time) >= target_usec) {
-        printf("%"PRIu32"\n", now - pacer_time);
+        //printf("%"PRIu32"\n", now - pacer_time);
         pacer_time = now;
         strokeprogress = 0;
         bars = 0;
     }
     else {
-        strokeprogress = (now - pacer_time) * 50 / target_usec;
-        if (strokeprogress > 25) {
-            bars = 50 - strokeprogress;
+        strokeprogress = (now - pacer_time) * 60 / target_usec;
+        if (strokeprogress > 30) {
+            bars = 60 - strokeprogress;
         }
         else {
             bars = strokeprogress;
         }
     }
 
-    for (int i = 1; i <= 5; i++) {
+    for (int i = 1; i <= 6; i++) {
         hd44780_gotoxy(&lcd, i-1, 0);
         if(bars >= i * 5) {
             hd44780_putc(&lcd, 5);
@@ -269,7 +271,7 @@ void app_main(void)
     last_time = esp_timer_get_time();
     while (1) {
         now = esp_timer_get_time();
-        if (now - last_time >= 200000) { // every 1/5 second
+        if (now - last_time >= 100000) { // every 1/5 second
             // grab and reset trigger count to not lose triggers during processing
             interval_triggers = trigger_count;
             trigger_count = 0;
@@ -313,9 +315,17 @@ void app_main(void)
                             pull = true;
                             pull_rate = 60000000/(now - last_pull);
                             last_pull = now;
-                            printf("-->       pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
+                            //printf("-->       pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
+                            printf("-->       pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d)\n",
+                              samples[0], samples[1], samples[2], samples[3], samples[4],
+                              samples[5], samples[6], samples[7], samples[8]
+                              );
                         } else {
-                            printf("--> false-pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
+                            //printf("--> false-pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
+                            printf("--> false pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d)\n",
+                              samples[0], samples[1], samples[2], samples[3], samples[4],
+                              samples[5], samples[6], samples[7], samples[8]
+                              );
                         }
                     }
                 }
