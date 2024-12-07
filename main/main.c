@@ -56,10 +56,15 @@
 // GPIO read logic
 static QueueHandle_t gpio_evt_queue = NULL;
 
+
+uint32_t last_edge_time = 0;
 static void IRAM_ATTR gpio_isr_handler(void* arg) {
-    //uint32_t gpio_num = (uint32_t) arg;
     uint32_t trigger_time = esp_timer_get_time();
-    xQueueSendFromISR(gpio_evt_queue, &trigger_time, NULL);
+    // crude debounce min 5ms between pulses = 200/sec
+    if (trigger_time - last_edge_time > 5000 ) {
+        last_edge_time = trigger_time;
+        xQueueSendFromISR(gpio_evt_queue, &trigger_time, NULL);
+    }
 }
 
 static uint32_t trigger_count = 0;
@@ -69,13 +74,14 @@ static void gpio_task(void* arg) {
     for (;;) {
         if (xQueueReceive(gpio_evt_queue, &trigger_time, portMAX_DELAY)) {
             trigger_count++;
+            printf("%"PRIu32", ", (uint32_t) trigger_time - last_trigger);
             last_trigger = trigger_time;
         }
     }
 }
 
 // https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
-// note - not skipping division by normalization because we only care about the sign
+// note - skipping division by normalization because we only care about the sign
 //static int coeff[5] = {-2, -1, 0, 1, 2};
 //static int samples[5] = {0, 0, 0, 0, 0};
 static int coeff[9] = {-4, -3, -2, -1, 0, 1, 2, 3, 4};
@@ -89,6 +95,18 @@ static int derivative(int sample) {
     samples[8] = sample;
     //printf("--> sample %d, deriv %d\n", sample, deriv);
     return deriv;
+}
+
+static int scoeff[5] = {-3, 12, 17, 12, -3};
+static int ssamples[5] = {0, 0, 0, 0, 0};
+static int smooth(int sample) {
+    int smooth = sample * scoeff[4];
+    for (int i = 0; i<4; i++) {
+        ssamples[i] = ssamples[i+1];
+        smooth += ssamples[i] * scoeff[i];
+    }
+    ssamples[4] = sample;
+    return smooth;
 }
 
 hd44780_t lcd = {
@@ -215,7 +233,7 @@ void app_main(void)
     // initialize the reed input switch GPIO
     gpio_pullup_en(GPIO_INPUT_IO_0);
     gpio_set_direction(GPIO_INPUT_IO_0, GPIO_MODE_INPUT);
-    gpio_set_intr_type(GPIO_INPUT_IO_0, GPIO_INTR_POSEDGE);
+    gpio_set_intr_type(GPIO_INPUT_IO_0, GPIO_INTR_NEGEDGE);
     gpio_intr_enable(GPIO_INPUT_IO_0);
 
     //create a queue to handle gpio event from isr
@@ -267,6 +285,7 @@ void app_main(void)
     static uint32_t strokes = 0;
     static unsigned short pull_rate = 0;
     static bool pull = false;
+    static int rest_count = 0;
     trigger_count = 0;
     last_time = esp_timer_get_time();
     while (1) {
@@ -280,7 +299,10 @@ void app_main(void)
             if (active) {
                 // check if not active
                 if (interval_triggers == 0) {
-                    printf("--> rest\n");
+                    rest_count += 1;
+                }
+                if (rest_count > 5) {
+                    printf("\n--> rest\n");
                     pull_rate = 0;
                     active = false;
                 }
@@ -289,9 +311,12 @@ void app_main(void)
             else {
                 // check if active
                 if (interval_triggers > 0) {
-                    printf("--> active\n");
+                    printf("\n--> active (%"PRIu32" triggers)\n", interval_triggers);
                     active = true;
                     rest = 0;
+                    rest_count = 0;
+                    // set last_time to now to avoid adding rest interval to pull rate smoothing
+                    last_time = now;
                 }
             }
 
@@ -303,28 +328,32 @@ void app_main(void)
 
                 // check stroke phase (roughly)
                 if (pull) {
-                    if (derivative(interval_triggers) <= 0) {
+                    if (derivative(smooth(interval_triggers)) < 0) {
                         pull = false;
+                        printf("\n-->    recover (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) %03d/s - %"PRIu32"\n",
+                          samples[0], samples[1], samples[2], samples[3], samples[4],
+                          samples[5], samples[6], samples[7], samples[8], pull_rate, (uint32_t) (now - last_pull)
+                          );
                     }
                 }
                 else {
-                    if (derivative(interval_triggers) > 0) {
+                    if (derivative(smooth(interval_triggers)) > 0) {
                         // ignore as false positive if stroke rate seems too high
-                        if (60000000/(now - last_pull) < 40) {
+                        if (now - last_pull > 150000 ) { //40/min = 1500000
                             strokes += 1;
                             pull = true;
                             pull_rate = 60000000/(now - last_pull);
-                            last_pull = now;
                             //printf("-->       pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
-                            printf("-->       pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d)\n",
+                            printf("\n-->       pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) %03d/s - %"PRIu32"\n",
                               samples[0], samples[1], samples[2], samples[3], samples[4],
-                              samples[5], samples[6], samples[7], samples[8]
+                              samples[5], samples[6], samples[7], samples[8], pull_rate, (uint32_t) (now - last_pull)
                               );
+                            last_pull = now;
                         } else {
                             //printf("--> false-pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
-                            printf("--> false pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d)\n",
+                            printf("\n--> false pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) - %"PRIu32"\n",
                               samples[0], samples[1], samples[2], samples[3], samples[4],
-                              samples[5], samples[6], samples[7], samples[8]
+                              samples[5], samples[6], samples[7], samples[8], (uint32_t) (now - last_pull)
                               );
                         }
                     }
@@ -332,7 +361,7 @@ void app_main(void)
             }
             else {
                 // add zero samples to derivative vector
-                derivative(0);
+                derivative(smooth(0));
                 rest += (now - last_time);
                 pull = false;
             }
