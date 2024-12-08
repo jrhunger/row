@@ -8,31 +8,26 @@ Replacement brainz for my (NordicTrack RW600) rowing machine.
 ## Current State
 Displays the following:
 * top row:
-  * current resting time mm:ss (increments when wheel is stopped, resets to zero when it starts)
+  * state-dependent:
+    * resting: current resting time mm:ss (increments when wheel is stopped, resets to zero when it starts)
+    * active: pacer bar indicating target stroke rate
   * stroke rate (pulls/minute)
   * total pull count
 * bottom row:
   * total active time mm:ss (increments when wheel is spinning, does not reset)
-  * pwr:  ### of reed switch impulses in most recent sample interval
-    * == wheel rotations * (unknown atm) number of magnets
+  * power:  smoothed and arbitrarily scaled ### of reed switch impulses in most recent sample intervals
   * distance: total # of reed switch impulses (basically dimensionless) 
 
 ## TODO
-* bug: sometimes the stroke rate goes way too high (100+)
-  * pull transition must be prematurely detected 
-  * detection is based on derivative calculation of last 5 samples - samples are 200ms
-    * calculating for midpoint (lag = 400ms)
-  * ? use larger window size for derivative?
-    * would increase the detection lag, unless sample is more frequent
-  * ? set max stroke rate (min stroke time) and ignore detection if not reached ?
-    * have seen 36 on dark horse rowing - 40 might be a good threshold
-* visual guide for desired stroke rate
-  * use resting time digits to make a spinning loop?
-  * will need some way to set the desired rate
+* control the target stroke rate
+  * quadrature encoder?
 * control the magnetic resistance
   * standard DC motor forward/reverse with potentiometer to indicate current position
 
 ## Reference / similar projects
+* [Sovitsky-Golay filters](https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter)
+  * used to get derivative of impulse delay times for stroke detection
+  * also smoothing the "power" samples, though a standard average would be fine here
 * [openrowingmonitor](https://github.com/laberning/openrowingmonitor) 
   * Mature and complex project in nodejs for Raspberry Pi. 
   * Trying to be physics-accurate, which is overkill for what i'm doing, but still a good reference
