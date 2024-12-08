@@ -67,19 +67,6 @@ static void IRAM_ATTR gpio_isr_handler(void* arg) {
     }
 }
 
-static uint32_t trigger_count = 0;
-static uint32_t last_trigger = 0;
-static void gpio_task(void* arg) {
-    uint32_t trigger_time;
-    for (;;) {
-        if (xQueueReceive(gpio_evt_queue, &trigger_time, portMAX_DELAY)) {
-            trigger_count++;
-            printf("%"PRIu32", ", (uint32_t) trigger_time - last_trigger);
-            last_trigger = trigger_time;
-        }
-    }
-}
-
 // https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
 // note - skipping division by normalization because we only care about the sign
 //static int coeff[5] = {-2, -1, 0, 1, 2};
@@ -93,10 +80,54 @@ static int derivative(int sample) {
         deriv += samples[i] * coeff[i];
     }
     samples[8] = sample;
-    //printf("--> sample %d, deriv %d\n", sample, deriv);
-    return deriv;
+    return deriv / 64; // normalization = 60, 64 is a shift divide, we really only care about sign
 }
 
+static uint32_t trigger_count = 0;
+static uint32_t last_trigger = 0;
+static bool active = false;
+static bool pull = false;
+static int64_t last_pull = 0;
+static unsigned short pull_rate = 0;
+static uint32_t strokes = 0;
+
+static void gpio_task(void* arg) {
+    uint32_t trigger_time;
+    for (;;) {
+        if (xQueueReceive(gpio_evt_queue, &trigger_time, portMAX_DELAY)) {
+            trigger_count++;
+            printf("%"PRIu32", ", (uint32_t) trigger_time - last_trigger);
+            if (! active) {
+                active = true;
+                last_trigger = trigger_time; // don't include rest time as sample
+            }
+            int deriv = derivative((int) (last_trigger - trigger_time));
+            if (pull && deriv < 0) {
+                pull = false;
+                printf("\n-->    recover (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) %03d/s - %"PRIu32"\n",
+                  samples[0], samples[1], samples[2], samples[3], samples[4],
+                  samples[5], samples[6], samples[7], samples[8], pull_rate, (uint32_t) (trigger_time - last_pull)
+                  );
+            } else if (! pull && deriv > 0) {
+                pull = true;
+                strokes += 1;
+                pull_rate = 60000000/(trigger_time - last_pull);
+                printf("\n-->       pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) %03d/s - %"PRIu32"\n",
+                  samples[0], samples[1], samples[2], samples[3], samples[4],
+                  samples[5], samples[6], samples[7], samples[8], pull_rate, (uint32_t) (trigger_time - last_pull)
+                  );
+                last_pull = trigger_time;
+            }
+
+            last_trigger = trigger_time;
+        }
+    }
+}
+
+// https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter
+// smoothing quadratic or cubic window = 5
+// since we want to add sampmles more than we want to use them, we leave the
+// division by 35 (normalization) to the consumer
 static int scoeff[5] = {-3, 12, 17, 12, -3};
 static int ssamples[5] = {0, 0, 0, 0, 0};
 static int smooth(int sample) {
@@ -196,22 +227,26 @@ static void update_display(
     static char strokes_string[6];
     static char power_string[6];
     static char distance_string[11];
-    static char pull_string[11];
+    static char pullrate_string[11];
     static char line[16];
 
     // create output line 0
-    snprintf(strokes_string, 6, "%3d", pull_rate);
-    snprintf(pull_string, 11, "%"PRIu32, strokes);
+    snprintf(pullrate_string, 6, "%3d", pull_rate);
+    snprintf(strokes_string, 11, "%"PRIu32, strokes);
     if (restmin != 0 || restsec != 0) {
+        // include rest time in line
         snprintf(resting_string, 8, "%02d:%02d", restmin, restsec);
-        snprintf(line, 17, "%.5s%4.4s%7.7s", resting_string, strokes_string, pull_string);
+        snprintf(line, 17, "%.5s%4.4s%7.7s", resting_string, pullrate_string, strokes_string);
+        // and start from beginning
         hd44780_gotoxy(&lcd, 0, 0);
     }
     else {
+        // don't include rest time in line
+        snprintf(line, 12, "%4.4s%7.7s", pullrate_string, strokes_string);
+        // and start printing 5 characters later
         hd44780_gotoxy(&lcd, 5, 0);
-        snprintf(line, 12, "%4.4s%7.7s", strokes_string, pull_string);
     }
-    //printf("%s\n", line);
+
     // display on LCD line 0
     hd44780_puts(&lcd, line);
 
@@ -258,7 +293,7 @@ void app_main(void)
     // ADC1 Channel Config
     adc_oneshot_chan_cfg_t config = {
         .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_11
+        .atten = ADC_ATTEN_DB_12
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_2, &config));
 
@@ -274,19 +309,14 @@ void app_main(void)
     // time variables
     static int64_t last_time = 0;
     static int64_t now = 0;
-    static int64_t last_pull = 0;
     static int64_t last_display = 0;
     static unsigned char min = 0;
     static unsigned char sec = 0;
     static unsigned char restmin = 0;
     static unsigned char restsec = 0;
-    static bool active = false;
     static uint32_t interval_triggers = 0;
-    static uint32_t strokes = 0;
-    static unsigned short pull_rate = 0;
-    static bool pull = false;
     static int rest_count = 0;
-    trigger_count = 0;
+    static int power = 0;
     last_time = esp_timer_get_time();
     while (1) {
         now = esp_timer_get_time();
@@ -295,18 +325,22 @@ void app_main(void)
             interval_triggers = trigger_count;
             trigger_count = 0;
 
-            // first check if state needs to change
             if (active) {
-                // check if not active
                 if (interval_triggers == 0) {
+                    // count idle periods before triggering rest state
                     rest_count += 1;
+                    if (rest_count > 5) { 
+                        printf("\n--> rest\n");
+                        pull_rate = 0;
+                        power = 0;
+                        active = false;
+                    }
+                } else {
+                    // not idle
+                    rest_count = 0;
+                    power = smooth(interval_triggers);
+                    update_pacer();
                 }
-                if (rest_count > 5) {
-                    printf("\n--> rest\n");
-                    pull_rate = 0;
-                    active = false;
-                }
-                update_pacer();
             }
             else {
                 // check if active
@@ -325,66 +359,26 @@ void app_main(void)
                 distance += interval_triggers;
                 // show total elapsed training time
                 elapsed += (now - last_time);
-
-                // check stroke phase (roughly)
-                if (pull) {
-                    if (derivative(smooth(interval_triggers)) < 0) {
-                        pull = false;
-                        printf("\n-->    recover (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) %03d/s - %"PRIu32"\n",
-                          samples[0], samples[1], samples[2], samples[3], samples[4],
-                          samples[5], samples[6], samples[7], samples[8], pull_rate, (uint32_t) (now - last_pull)
-                          );
-                    }
-                }
-                else {
-                    if (derivative(smooth(interval_triggers)) > 0) {
-                        // ignore as false positive if stroke rate seems too high
-                        if (now - last_pull > 150000 ) { //40/min = 1500000
-                            strokes += 1;
-                            pull = true;
-                            pull_rate = 60000000/(now - last_pull);
-                            //printf("-->       pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
-                            printf("\n-->       pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) %03d/s - %"PRIu32"\n",
-                              samples[0], samples[1], samples[2], samples[3], samples[4],
-                              samples[5], samples[6], samples[7], samples[8], pull_rate, (uint32_t) (now - last_pull)
-                              );
-                            last_pull = now;
-                        } else {
-                            //printf("--> false-pull (%03d, %03d, %03d, %03d, %03d)\n", samples[0], samples[1], samples[2], samples[3], samples[4]);
-                            printf("\n--> false pull (%03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d, %03d) - %"PRIu32"\n",
-                              samples[0], samples[1], samples[2], samples[3], samples[4],
-                              samples[5], samples[6], samples[7], samples[8], (uint32_t) (now - last_pull)
-                              );
-                        }
-                    }
-                }
+                rest = 0;
             }
             else {
                 // add zero samples to derivative vector
-                derivative(smooth(0));
+                derivative(0);
                 rest += (now - last_time);
-                pull = false;
             }
 
-            if (now - last_display >= 590000) {
+            if (now - last_display >= 500000) {
                 min = elapsed / 60000000;
                 sec = (elapsed / 1000000) % 60;
                 restmin = rest / 60000000;
                 restsec = (rest / 1000000) % 60;
                     
-                //ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &adc_raw[0][0]));
-                // ADC is 0 to 4095.  right-shift 4 takes it to 0-255
-                //scaled_adc = (unsigned char) adc_raw[0][0]>>4;
-
                 update_display(
                     //line 1
-                    restmin, restsec, 
-                    pull_rate,
-                    strokes,
-                    // line 2
-                    min, sec,
-                    interval_triggers,
-                    distance
+                    restmin, restsec, pull_rate, strokes,
+                    // line 2 (divide by 35 is proper normalization for smoothing)
+                    //        (10 gives a good range for the arbitrary "power" number)
+                    min, sec, power / 10, distance
                 );
                 last_display = now;
             }
@@ -392,6 +386,6 @@ void app_main(void)
         }
 
         // allow other tasks time to run
-        vTaskDelay(10);
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
